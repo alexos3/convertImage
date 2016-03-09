@@ -1,0 +1,416 @@
+package com.snapon.sbs.epc.client.view.util;
+
+import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferByte;
+import java.awt.image.IndexColorModel;
+import java.awt.image.WritableRaster;
+
+public class ImageExtractorFV4
+{
+  public static final int IMAGE_TYPE_UNKNOWN = 0;
+  public static final int IMAGE_TYPE_FV4 = 1;
+  public static final int IMAGE_TYPE_GIF = 2;
+  public static final int IMAGE_TYPE_TIF = 3;
+  public static final int COMPRESSION_UNKNOWN = 0;
+  public static final int COMPRESSION_NONE = 1;
+  public static final int COMPRESSION_GROUP4 = 2;
+  static final int FV4_ROWS = 1280;
+  static final int FV4_COLUMNS = 1024;
+  static final int[] codeBits = { 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 4, 5 };
+  static final int[] rightShift = { 30, 30, 30, 30, 30, 30, 30, 30, 28, 28, 28, 28, 26, 26, 24, 22 };
+  static final int[] codeBase = { 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 4, 4, 20, 20, 84, 340 };
+  private int currentRow;
+  protected int rows;
+  protected int columns;
+  protected int bitsPerPixel;
+  protected BufferedImage image;
+  protected byte[] colorArray;
+  protected byte[] annotationData;
+  protected IndexColorModel cm;
+  
+  public ImageExtractorFV4()
+  {
+    this.currentRow = 0;
+    this.image = new BufferedImage(1024, 1280, 13);
+    
+    this.annotationData = null;
+  }
+  
+  public BufferedImage getImage(byte[] fv4bytes, EPCImageViewerCalloutArray calloutArray)
+  {
+    if (fv4bytes == null) {
+      return null;
+    }
+    try
+    {
+      int bufferOffset = 0;
+      
+      WritableRaster writableRaster = this.image.getRaster();
+      DataBufferByte dataBuffer = (DataBufferByte)writableRaster.getDataBuffer();
+      
+      byte[] imageBuf = dataBuffer.getData();
+      
+      int count = decodeImageHeader(fv4bytes, 0, fv4bytes.length, calloutArray);
+      if (count <= 0) {
+        return null;
+      }
+      bufferOffset += count;
+      while (bufferOffset < fv4bytes.length)
+      {
+        count = decodeImageData(fv4bytes, bufferOffset, fv4bytes.length - bufferOffset, imageBuf);
+        if (count < 0) {
+          return null;
+        }
+        if (count == 0) {
+          break;
+        }
+        bufferOffset += count;
+      }
+    }
+    catch (Throwable t)
+    {
+      t.printStackTrace();
+    }
+    return this.image;
+  }
+  
+  public int decodeImageHeader(byte[] buffer, int bufferOffset, int bufferBytes, EPCImageViewerCalloutArray calloutArray)
+  {
+    int rasterOffset = 0;
+    int rasterLength = 0;
+    int annotationOffset = 0;
+    int annotationLength = 0;
+    
+    this.bitsPerPixel = buffer[35];
+    this.columns = (((buffer[38] & 0xFF) << 8) + (buffer[39] & 0xFF));
+    this.rows = (((buffer[40] & 0xFF) << 8) + (buffer[41] & 0xFF));
+    int overlays = buffer[45];
+    if (((this.bitsPerPixel != 1) && (this.bitsPerPixel != 2) && (this.bitsPerPixel != 4)) || (this.columns != 1024) || (this.rows > 1280) || (overlays > 2)) {
+      return -1;
+    }
+    int offset = 46;
+    while (overlays-- > 0)
+    {
+      if ((buffer[offset] == 1) && (buffer[(offset + 1)] == 1))
+      {
+        rasterOffset = ((buffer[(offset + 6)] & 0xFF) << 8) + (buffer[(offset + 7)] & 0xFF);
+        
+        rasterLength = ((buffer[(offset + 10)] & 0xFF) << 8) + (buffer[(offset + 11)] & 0xFF);
+      }
+      else if ((buffer[offset] == 32) && (buffer[(offset + 1)] == 1))
+      {
+        annotationOffset = ((buffer[(offset + 6)] & 0xFF) << 8) + (buffer[(offset + 7)] & 0xFF);
+        
+        annotationLength = ((buffer[(offset + 10)] & 0xFF) << 8) + (buffer[(offset + 11)] & 0xFF);
+        
+        this.annotationData = new byte[annotationLength];
+        System.arraycopy(buffer, annotationOffset, this.annotationData, 0, annotationLength);
+        
+        saveCallouts(this.annotationData, annotationLength, calloutArray);
+      }
+      offset += 16;
+    }
+    if ((rasterOffset == 0) || (rasterOffset + rasterLength > bufferOffset + bufferBytes) || (buffer[rasterOffset] != 1) || (buffer[(rasterOffset + 1)] != 4)) {
+      return -1;
+    }
+    offset = rasterOffset + 18;
+    int index = 0;
+    int count = 1 << this.bitsPerPixel;
+    this.colorArray = new byte[count];
+    while (index < count)
+    {
+      int tmp;
+      int tmp;
+      if ((index & 0x1) == 1) {
+        tmp = 0xF & buffer[(offset++)];
+      } else {
+        tmp = (0xF0 & buffer[offset]) >> 4;
+      }
+      if (this.bitsPerPixel == 1) {
+        tmp <<= 3;
+      } else if (this.bitsPerPixel == 2) {
+        tmp <<= 2;
+      } else {
+        tmp <<= 1;
+      }
+      this.colorArray[(index++)] = buffer[(2 + tmp)];
+    }
+    this.cm = new IndexColorModel(this.bitsPerPixel, count, this.colorArray, this.colorArray, this.colorArray);
+    int tmp;
+    if (rasterOffset > annotationOffset) {
+      tmp = rasterOffset + rasterLength - 1;
+    } else {
+      tmp = annotationOffset + annotationLength - 1;
+    }
+    int tmp = (tmp + 1023) / 1024 * 1024;
+    return tmp;
+  }
+  
+  public int decodeImageData(byte[] buffer, int bufferOffset, int bufferBytes, byte[] imageBuf)
+  {
+    short[][] planesOdd = new short[this.bitsPerPixel]['�'];
+    short[][] planesEven = new short[this.bitsPerPixel]['�'];
+    
+    byte[] imagePaletteIn = new byte['�'];
+    
+    int subgroupBits = ((buffer[(bufferOffset + 6)] & 0xFF) << 8) + (buffer[(bufferOffset + 5)] & 0xFF);
+    
+    int subgroupBytes = subgroupBits + 7 >> 3;
+    if (subgroupBytes + 16 > bufferBytes) {
+      return 0;
+    }
+    int subgroupStartRow = ((buffer[(bufferOffset + 1)] & 0xFF) << 8) + (buffer[(bufferOffset + 0)] & 0xFF);
+    if ((buffer[(bufferOffset + 4)] != this.bitsPerPixel) || (subgroupStartRow != this.currentRow)) {
+      return 0;
+    }
+    int subgroupRows = ((buffer[(bufferOffset + 3)] & 0xFF) << 8) + (buffer[(bufferOffset + 2)] & 0xFF);
+    
+    int bufferIndex = bufferOffset + 16;
+    int value = (buffer[(bufferIndex++)] & 0xFF) << 24;
+    value |= (buffer[(bufferIndex++)] & 0xFF) << 16;
+    value |= (buffer[(bufferIndex++)] & 0xFF) << 8;
+    value |= buffer[(bufferIndex++)] & 0xFF;
+    
+    int iTmp = imagePaletteIn.length;
+    int index = 0;
+    while (index < iTmp) {
+      imagePaletteIn[(index++)] = 0;
+    }
+    int bitCount = 0;
+    boolean odd = false;
+    while (subgroupRows-- > 0)
+    {
+      odd = !odd;
+      byte imageMask = (byte)(1 << this.bitsPerPixel - 1);
+      int bitPlane = 0;
+      while (bitPlane < this.bitsPerPixel)
+      {
+        short[] planePrevious;
+        short[] planeCurrent;
+        short[] planePrevious;
+        if (odd == true)
+        {
+          short[] planeCurrent = planesOdd[bitPlane];
+          planePrevious = planesEven[bitPlane];
+        }
+        else
+        {
+          planeCurrent = planesEven[bitPlane];
+          planePrevious = planesOdd[bitPlane];
+        }
+        bitPlane++;
+        
+        int toggle = 0;
+        int toggleSave = toggle;
+        int indexCurrent = 0;
+        int indexPrevious = 0;
+        
+        int column = 0;
+        while (column < 1024)
+        {
+          if ((value & 0xE0000000) == -536870912)
+          {
+            index = (value & 0x1E000000) >> 25;
+            iTmp = codeBits[index];
+            value <<= 3 + iTmp;
+            bitCount += 3 + iTmp;
+            int runLength = value >>> rightShift[index];
+            runLength += codeBase[index];
+            iTmp <<= 1;
+            value <<= iTmp;
+            bitCount += iTmp;
+            column += runLength;
+          }
+          else
+          {
+            int relLength;
+            if ((value & 0x80000000) == 0)
+            {
+              int relLength = 0;
+              value <<= 1;
+              bitCount++;
+            }
+            else if ((value & 0x40000000) == 0)
+            {
+              int relLength;
+              int relLength;
+              if ((value & 0x20000000) == 0) {
+                relLength = 1;
+              } else {
+                relLength = -1;
+              }
+              value <<= 3;
+              bitCount += 3;
+            }
+            else
+            {
+              int sign = value & 0x10000000;
+              index = (value & 0xF000000) >> 24;
+              iTmp = codeBits[index];
+              value <<= 4 + iTmp;
+              bitCount += 4 + iTmp;
+              relLength = value >>> rightShift[index];
+              relLength += codeBase[index] + 2;
+              if (sign != 0) {
+                relLength = -relLength;
+              }
+              iTmp <<= 1;
+              value <<= iTmp;
+              bitCount += iTmp;
+            }
+            if (toggle != toggleSave) {
+              if (indexPrevious == 0) {
+                indexPrevious++;
+              } else {
+                indexPrevious--;
+              }
+            }
+            if (indexCurrent == 0) {
+              iTmp = 0;
+            } else {
+              iTmp = planeCurrent[(indexCurrent - 1)];
+            }
+            while (planePrevious[indexPrevious] <= iTmp) {
+              indexPrevious += 2;
+            }
+            column = planePrevious[indexPrevious] + relLength;
+            toggleSave = toggle;
+          }
+          planeCurrent[(indexCurrent++)] = ((short)column); int 
+            tmp706_704 = column; byte[] tmp706_702 = imagePaletteIn;tmp706_702[tmp706_704] = ((byte)(tmp706_702[tmp706_704] | imageMask));
+          if (bitCount >= 8)
+          {
+            iTmp = 0;
+            while (bitCount >= 8)
+            {
+              bitCount -= 8;
+              subgroupBits -= 8;
+              if (bufferIndex >= buffer.length) {
+                break;
+              }
+              iTmp = iTmp << 8 | buffer[(bufferIndex++)] & 0xFF;
+            }
+            value |= iTmp << bitCount;
+          }
+          toggle ^= 0x1;
+        }
+        if (column != 1024) {
+          return -1;
+        }
+        planeCurrent[(indexCurrent++)] = ((short)column);
+        planeCurrent[(indexCurrent++)] = ((short)column); int 
+          tmp820_818 = column; byte[] tmp820_816 = imagePaletteIn;tmp820_816[tmp820_818] = ((byte)(tmp820_816[tmp820_818] | imageMask));
+        imageMask = (byte)(imageMask >> 1);
+      }
+      imageMask = (byte)((1 << this.bitsPerPixel) - 1);
+      if (imagePaletteIn[0] != 0) {
+        imageMask = (byte)(imagePaletteIn[0] ^ imageMask);
+      }
+      imagePaletteIn[0] = 0;
+      
+      int offset = this.currentRow * 1024;
+      iTmp = 0;
+      while (iTmp++ < 1024)
+      {
+        switch (imageMask)
+        {
+        case 0: 
+          imageBuf[offset] = 0;
+          break;
+        case 1: 
+          imageBuf[offset] = -27;
+          break;
+        case 2: 
+          imageBuf[offset] = -14;
+          break;
+        case 3: 
+          imageBuf[offset] = -1;
+        }
+        if (imagePaletteIn[iTmp] != 0)
+        {
+          imageMask = (byte)(imagePaletteIn[iTmp] ^ imageMask);
+          imagePaletteIn[iTmp] = 0;
+        }
+        offset++;
+      }
+      this.currentRow += 1;
+    }
+    subgroupBytes = (subgroupBytes + 1023) / 1024 * 1024;
+    return subgroupBytes;
+  }
+  
+  public void saveCallouts(byte[] annotationData, int annotationLength, EPCImageViewerCalloutArray calloutArray)
+  {
+    int len1 = annotationData[18] & 0xFF;
+    int len2 = annotationData[19] & 0xFF;
+    int len = 256 * len1 + len2;
+    
+    int count1 = annotationData[20] & 0xFF;
+    int count2 = annotationData[21] & 0xFF;
+    
+    int count = 256 * count1 + count2;
+    
+    calloutArray.allocate(count);
+    
+    int n = 0;
+    int i = 22;
+    while ((i < annotationLength) && (n < count))
+    {
+      int si = i - 1;
+      
+      int x = 0;
+      int x1 = annotationData[(i++)];
+      if (x1 < 0) {
+        x1 += 256;
+      }
+      x1 <<= 8;
+      x |= x1;
+      int x2 = annotationData[(i++)];
+      if (x2 < 0) {
+        x2 += 256;
+      }
+      x |= x2;
+      
+      int y = 0;
+      int y1 = annotationData[(i++)];
+      if (y1 < 0) {
+        y1 += 256;
+      }
+      y1 <<= 8;
+      y |= y1;
+      int y2 = annotationData[(i++)];
+      if (y2 < 0) {
+        y2 += 256;
+      }
+      y |= y2;
+      
+      int counter = 0;
+      while (annotationData[(i + counter)] != 0) {
+        counter++;
+      }
+      String c = new String(annotationData, i, counter);
+      
+      calloutArray.addToX(x, n);
+      calloutArray.addToY(y, n);
+      calloutArray.addToCalloutDesc(c, n);
+      
+      i += counter;
+      while (i < annotationData.length)
+      {
+        if ((i - si) % len == 0) {
+          break;
+        }
+        i++;
+      }
+      while (i < annotationData.length)
+      {
+        if ((i - si) % 4 == 0) {
+          break;
+        }
+        i++;
+      }
+      i++;
+      n++;
+    }
+  }
+}

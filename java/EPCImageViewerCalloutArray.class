@@ -1,0 +1,61 @@
+package com.snapon.sbs.epc.epci.api.rest.bus.image;
+
+public class EPCImageViewerCalloutArray
+{
+  private int[] x;
+  private int[] y;
+  private String[] c;
+  private int count;
+  
+  public void clearCalloutArray()
+  {
+    this.c = null;
+    this.x = null;
+    this.y = null;
+    this.count = 0;
+  }
+  
+  public void allocate(int calloutCount)
+  {
+    this.count = calloutCount;
+    this.x = new int[calloutCount];
+    this.y = new int[calloutCount];
+    this.c = new String[calloutCount];
+  }
+  
+  public int getX(int index)
+  {
+    return this.x[index];
+  }
+  
+  public int getY(int index)
+  {
+    return this.y[index];
+  }
+  
+  public String getCalloutDesc(int index)
+  {
+    return this.c[index];
+  }
+  
+  public void addToX(int value, int index)
+  {
+    this.x[index] = value;
+  }
+  
+  public void addToY(int value, int index)
+  {
+    this.y[index] = value;
+  }
+  
+  public void addToCalloutDesc(String value, int index)
+  {
+    value = value.trim();
+    this.c[index] = value;
+  }
+  
+  public int getCount()
+  {
+    return this.count;
+  }
+}
